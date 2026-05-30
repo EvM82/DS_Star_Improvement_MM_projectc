@@ -1,0 +1,8 @@
+
+run_id: "qwen_feedback_test_2"
+model_name: "ollama/qwen3:8b"
+interactive: false
+max_refinement_rounds: 1
+auto_debug: false
+debug_attempts: 1
+preserve_artifacts: true

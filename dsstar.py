@@ -2,6 +2,8 @@ import os
 import json
 import subprocess
 import re
+import pandas as pd
+from ydata_profiling import ProfileReport
 import uuid
 from typing import List, Dict, Tuple, Optional, Any
 from pathlib import Path
@@ -512,6 +514,41 @@ class DS_STAR_Agent:
         
         return self._extract_code_block(result)
 
+    def is_profile_supported(self, file_path: str) -> bool:
+        ext = Path(file_path).suffix.lower()
+        return ext in [".csv", ".xlsx", ".xls", ".json"]
+
+    def load_dataframe(self, file_path: str) -> pd.DataFrame:
+        ext = Path(file_path).suffix.lower()
+        try:
+            if ext == ".csv":
+                return pd.read_csv(file_path)
+            elif ext in [".xlsx", ".xls"]:
+                return pd.read_excel(file_path)
+            elif ext == ".json":
+                with open(file_path, "r") as f:
+                    data = json.load(f)
+                return pd.json_normalize(data)
+            else:
+                raise ValueError(f"Unsupported file format: {ext}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load {file_path}: {e}")
+
+    def extract_profile_summary(self, profile_json):
+        """
+        Keep only:
+        - table
+        - alerts
+        """
+        if isinstance(profile_json, str):
+            profile = json.loads(profile_json)
+        else:
+            profile = profile_json
+
+        return {
+            "table": profile.get("table", {}),
+            "alerts": profile.get("alerts", [])
+        }
     def run_pipeline(self, query: str, data_files: List[str]) -> Dict[str, Any]:
         """Main pipeline with full persistence and resume capability."""
         self.controller.logger.info(f"Starting pipeline: {self.config.run_id}")
@@ -535,22 +572,66 @@ class DS_STAR_Agent:
             self.controller.logger.info("=== PHASE 1: ANALYZING DATA FILES ===")
             data_descriptions = {}
             absolute_data_files = []
+            profiles_dir =  self.storage.run_dir / "profiles"
+            profiles_dir.mkdir(parents=True, exist_ok=True)
             for i, f in enumerate(data_files):
                 self.controller.logger.info(f"Analyzing {f}...")
                 abs_path = str(Path(self.config.data_dir).joinpath(f).resolve())
+                print("abs_path:",abs_path)
                 absolute_data_files.append(abs_path)
                 analysis = self.analyze_data(abs_path)
-                data_descriptions[abs_path] = analysis["result"]
-            
+                profile_summary = None
+                html_path = None
+                if self.is_profile_supported(abs_path):
+                    try:
+                        df = self.load_dataframe(abs_path)
+                        profile = ProfileReport(
+                            df,
+                            title=f"Profiling Report - {Path(f).stem}",
+                            explorative=True
+                        )
+                        # Save HTML full report
+                        html_path = profiles_dir / f"{Path(f).stem}.html"
+                        print("html_path", html_path)
+                        profile.to_file(html_path)
+                        # Extract summary JSON
+                        profile_json = profile.to_json()
+                        profile_summary = self.extract_profile_summary(profile_json)
+                        print("profile_summary",profile_summary)
+                    except Exception as e:
+                        self.controller.logger.warning(
+                            f"Profiling failed for {f}: {e}"
+                        )
+                else:
+                    self.controller.logger.info(
+                        f"Skipping profiling for unsupported file type: {f}"
+                    )
+                data_descriptions[abs_path] = {
+                    "analysis": analysis["result"],
+                    "profile_summary": profile_summary,
+                }
             state = self.storage.get_current_state()
             state["data_descriptions"] = data_descriptions
             self.storage.save_state(state)
+
         else:
             # Load from previous run
+            state = self.storage.get_current_state()
             data_descriptions = state["data_descriptions"]
             absolute_data_files = list(data_descriptions.keys())
-        
-        data_desc_str = "\n".join([f"File: {k}\n{v}" for k, v in data_descriptions.items()])
+
+        data_desc_str = "\n\n".join([
+            f"""=========================================
+            Full Path: {k}
+            =========================================
+
+            [1. ANALYSIS]
+            {v.get('analysis', '')}
+            [2. PROFILE SUMMARY]
+            {json.dumps(v.get('profile_summary') or {}, indent=2)}
+            """
+                for k, v in data_descriptions.items()
+            ])
         
         # PHASE 2: Iterative Planning & Execution
         # Use explicit phase flag instead of step-index math, which broke

@@ -32,6 +32,8 @@ dependencies = [
     "pandas>=2.3.3",
     "openpyxl>=3.1.5",
     "ollama>=0.6.1",
+    "ydata-profiling",
+    "setuptools<81",
 ]
 
 [project.scripts]

@@ -2,8 +2,6 @@ import os
 import json
 import subprocess
 import re
-import pandas as pd
-from ydata_profiling import ProfileReport
 import uuid
 from typing import List, Dict, Tuple, Optional, Any
 from pathlib import Path
@@ -13,6 +11,142 @@ import yaml
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from provider import ModelProvider, GeminiProvider, OllamaProvider, OpenAIProvider
+
+#######################################################################################################
+######################################## Schema for classifier query, verification changes output######
+QUERY_CLASSIFIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query_type": {
+            "type": "string",
+            "enum": ["standalone", "follow_up"]
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+        },
+        "reason": {
+            "type": "string"
+        },
+        "needs_history": {
+            "type": "boolean"
+        }
+    },
+    "required": ["query_type", "confidence", "reason", "needs_history"],
+    "additionalProperties": False
+}
+
+
+VERIFIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_complete": {"type": "boolean"},
+        "answered_requirements": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "missing_requirements": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "execution_errors": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "next_recommended_step": {"type": "string"},
+        "reason": {"type": "string"}
+    },
+    "required": [
+        "is_complete",
+        "answered_requirements",
+        "missing_requirements",
+        "execution_errors",
+        "next_recommended_step",
+        "reason"
+    ],
+    "additionalProperties": False
+}
+
+
+
+TASK_ANALYZER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "primary_task": {
+            "type": "string",
+            "enum": [
+                "eda",
+                "visualization",
+                "classification",
+                "regression",
+                "clustering",
+                "data_cleaning",
+                "statistical_analysis",
+                "unknown"
+            ]
+        },
+        "secondary_tasks": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "eda",
+                    "visualization",
+                    "classification",
+                    "regression",
+                    "clustering",
+                    "data_cleaning",
+                    "statistical_analysis",
+                    "unknown"
+                ]
+            }
+        },
+        "requires_machine_learning": {
+            "type": "boolean"
+        },
+        "ml_problem_type": {
+            "type": "string",
+            "enum": [
+                "classification",
+                "regression",
+                "clustering",
+                "none",
+                "unknown"
+            ]
+        },
+        "target_column": {
+            "type": ["string", "null"]
+        },
+        "requested_outputs": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "planning_hints": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "reason": {
+            "type": "string"
+        }
+    },
+    "required": [
+        "primary_task",
+        "secondary_tasks",
+        "requires_machine_learning",
+        "ml_problem_type",
+        "target_column",
+        "requested_outputs",
+        "planning_hints",
+        "reason"
+    ],
+    "additionalProperties": False
+}
+
+###########################################################################
+###########################################################################
+
+
 
 # =============================================================================
 # CONFIGURATION & PROMPT TEMPLATES
@@ -38,7 +172,7 @@ class DSConfig:
     data_dir: str = "data"
     code_library_dir: str = "code_library"
     agent_models: Dict[str, str] = field(default_factory=dict)
-    
+
     def __post_init__(self):
         if self.run_id is None:
             self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:6]}"
@@ -54,12 +188,12 @@ class DSConfig:
 
 class ArtifactStorage:
     """Persistently stores every step of the pipeline for reproducibility."""
-    
+
     def __init__(self, config: DSConfig):
         self.config = config
         self.run_dir = Path(config.runs_dir) / config.run_id
         self._setup_directories()
-        
+
     def _setup_directories(self):
         """Create directory structure for this run."""
         dirs = [
@@ -71,23 +205,23 @@ class ArtifactStorage:
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
-            
-    def save_step(self, step_id: str, step_type: str, prompt: str, 
+
+    def save_step(self, step_id: str, step_type: str, prompt: str,
                   code: Optional[str], result: str, metadata: Dict[str, Any]):
         """Save all artifacts for a single pipeline step."""
         step_dir = self.run_dir / "steps" / step_id
         step_dir.mkdir(exist_ok=True)
-        
+
         # Save prompt
         (step_dir / "prompt.md").write_text(prompt, encoding='utf-8')
-        
+
         # Save generated code
         if code:
             (step_dir / "code.py").write_text(code, encoding='utf-8')
-            
+
         # Save execution result
         (step_dir / "result.txt").write_text(result, encoding='utf-8')
-        
+
         # Save metadata
         metadata.update({
             "timestamp": datetime.now().isoformat(),
@@ -96,22 +230,22 @@ class ArtifactStorage:
         })
         with open(step_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
-            
+
     def get_step(self, step_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a previous step's artifacts."""
         step_dirs = list(self.run_dir.glob(f"steps/{step_id}_*"))
         if not step_dirs:
             return None
-        
+
         step_dir = step_dirs[0]
         return {
             "prompt": (step_dir / "prompt.md").read_text(encoding='utf-8'),
-            "code": (step_dir / "code.py").read_text(encoding='utf-8') 
+            "code": (step_dir / "code.py").read_text(encoding='utf-8')
                    if (step_dir / "code.py").exists() else None,
             "result": (step_dir / "result.txt").read_text(encoding='utf-8'),
             "metadata": json.loads((step_dir / "metadata.json").read_text())
         }
-    
+
     def list_steps(self) -> List[Dict[str, Any]]:
         """List all steps in chronological order."""
         steps = []
@@ -120,14 +254,14 @@ class ArtifactStorage:
                 metadata = json.load(f)
                 steps.append(metadata)
         return steps
-    
+
     def get_current_state(self) -> Dict[str, Any]:
         """Load the pipeline state."""
         state_file = self.run_dir / "pipeline_state.json"
         if state_file.exists():
             return json.loads(state_file.read_text())
         return {"current_step": 0, "completed_steps": [], "plan": [], "data_descriptions": {}}
-    
+
     def save_state(self, state: Dict[str, Any]):
         """Save the pipeline state."""
         state_file = self.run_dir / "pipeline_state.json"
@@ -139,13 +273,13 @@ class ArtifactStorage:
 
 class PipelineController:
     """Manages pipeline execution with resume and editing capabilities."""
-    
+
     def __init__(self, config: DSConfig, storage: ArtifactStorage, agent: 'DS_STAR_Agent'):
         self.config = config
         self.storage = storage
         self.agent = agent
         self.logger = self._setup_logger()
-        
+
     def _setup_logger(self):
         """Setup structured logging."""
         import logging
@@ -159,23 +293,23 @@ class PipelineController:
             ]
         )
         return logging.getLogger(__name__)
-    
+
     def should_execute_step(self, step_index: int) -> bool:
         """Check if step should be executed (for resuming)."""
         state = self.storage.get_current_state()
         return step_index >= state["current_step"]
-    
+
     def execute_step(self, step_name: str, step_func, **kwargs) -> Any:
         """Execute a single step with full artifact preservation."""
         step_id = f"{self._get_next_step_index():03d}_{step_name}"
-        
+
         self.logger.info(f"{'='*50}")
         self.logger.info(f"STEP {step_id}")
         self.logger.info(f"{'='*50}")
-        
+
         # Execute the step
         result = step_func(**kwargs)
-        
+
         # Save artifacts
         if self.config.preserve_artifacts:
             metadata = kwargs.copy()
@@ -188,34 +322,34 @@ class PipelineController:
                 result=str(result.get("result") if isinstance(result, dict) else result),
                 metadata=metadata
             )
-        
+
         # Update state
         state = self.storage.get_current_state()
         state["current_step"] = self._get_next_step_index()
         state["completed_steps"].append(step_id)
         self.storage.save_state(state)
-        
+
         # Interactive mode
         if self.config.interactive:
             input(f"Step {step_id} complete. Press Enter to continue...")
-            
+
         return result
-    
+
     def _get_next_step_index(self) -> int:
         """Get the next step index."""
         steps = self.storage.list_steps()
         return len(steps)
-    
+
     def edit_last_step_code(self):
         """Allow manual editing of the last generated code."""
         steps = self.storage.list_steps()
         if not steps:
             return
-        
+
         last_step = steps[-1]
         step_dir = self.storage.run_dir / "steps" / f"{last_step['step_id']}_{last_step['step_type']}"
         code_file = step_dir / "code.py"
-        
+
         if code_file.exists():
             self.logger.info(f"Opening {code_file} for editing...")
             # Use system editor
@@ -234,7 +368,7 @@ class PipelineController:
 
 class DS_STAR_Agent:
     """DS-STAR agent with persistent artifact storage."""
-    
+
     def __init__(self, config: DSConfig):
         self.config = config
         self.storage = ArtifactStorage(config)
@@ -242,10 +376,10 @@ class DS_STAR_Agent:
         # Initialize providers for each agent type
         self.providers = {}
         default_model = config.model_name
-        
+
         # List of known agents
-        agents = ["ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
-        
+        agents = ["ANALYZER", "QUERY_CLASSIFIER","TASK_ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
+
         def get_provider_for_model(model_name: str, config: DSConfig) -> ModelProvider:
             provider_cls = None
             for provider in [OllamaProvider, OpenAIProvider, GeminiProvider]:
@@ -255,25 +389,25 @@ class DS_STAR_Agent:
 
             if not provider_cls:
                 raise ValueError(f"No provider found for model {model_name}")
-            
+
             return provider_cls(config.api_key, model_name)
 
         for agent in agents:
             model_name = config.agent_models.get(agent, default_model)
             self.providers[agent] = get_provider_for_model(model_name, config)
             self.controller.logger.info(f"Initialized {agent} with model: {model_name}")
-        
+
         # Setup execution environment
         self.exec_dir = Path(config.runs_dir) / config.run_id / "exec_env"
         self.exec_dir.mkdir(exist_ok=True)
-        
+
         self._setup_tee_logging()
-        
+
     def _setup_tee_logging(self):
         """Tee stdout/stderr to both console and log file."""
         log_path = self.storage.run_dir / "logs" / "execution.log"
         self.log_file = open(log_path, 'a', encoding='utf-8')
-        
+
         class _Tee:
             def __init__(self, *writers):
                 self.writers = writers
@@ -290,32 +424,37 @@ class DS_STAR_Agent:
                         w.flush()
                     except Exception:
                         pass
-        
+
         sys.stdout = _Tee(sys.stdout, self.log_file)
         sys.stderr = _Tee(sys.stderr, self.log_file)
-        
+
         atexit.register(lambda: self.log_file.close())
-    
-    def _call_model(self, agent_name: str, prompt: str) -> str:
+
+    def _call_model(self, agent_name: str, prompt: str,temperature=None, format=None) -> str:
         """Call the appropriate model provider for the agent."""
         try:
             provider = self.providers[agent_name]
-            response_text = provider.generate_content(prompt)
+            #response_text = provider.generate_content(prompt)
+            response_text = provider.generate_content(
+                prompt,
+                temperature=temperature,
+                format=format
+            )
             self.controller.logger.info(f"[{agent_name}] Response received ({len(response_text)} chars)")
             return response_text
         except Exception as e:
             error_msg = f"Error calling model for {agent_name}: {str(e)}"
             self.controller.logger.error(error_msg)
             raise
-    
+
     def _extract_code_block(self, response: str) -> str:
         """Extract Python code from markdown blocks."""
         code_blocks = re.findall(r'```(?:python)?\n(.*?)\n```', response, re.DOTALL)
         return code_blocks[0] if code_blocks else response.strip()
-    
 
 
-  ####################### ADD FUNCTION #########################
+
+  ####################### ADD parse FUNCTION for verifier, Task Analyzer, Query Classifier #########################
     def _parse_verifier_json(self, verdict: str) -> dict:
       try:
           return json.loads(verdict)
@@ -329,15 +468,41 @@ class DS_STAR_Agent:
               "reason": verdict
           }
 
-  ####################################################
+    def _parse_task_analysis_json(self, task_analysis: str) -> dict:
+        try:
+            return json.loads(task_analysis)
+        except Exception:
+            return {
+                "primary_task": "unknown",
+                "secondary_tasks": [],
+                "requires_machine_learning": False,
+                "ml_problem_type": "unknown",
+                "target_column": None,
+                "requested_outputs": [],
+                "planning_hints": [],
+                "reason": task_analysis
+            }
+  
 
+    def _parse_query_classifier_json(self, result: str) -> dict:
+        try:
+            return json.loads(result)
+        except Exception:
+            return {
+                "query_type": "follow_up",
+                "confidence": 0.0,
+                "reason": result,
+                "needs_history": True,
+                "missing_context": []
+            }  
 
+##############################################################################
 
 
     def _execute_code(self, code_script: str, data_files: Optional[List[str]] = None) -> Tuple[str, Optional[str]]:
         """Execute code in isolated environment."""
         self.controller.logger.info("Executing code...")
-        
+
         # Validate data files
         if data_files:
             missing = []
@@ -351,12 +516,12 @@ class DS_STAR_Agent:
                         missing.append(f)
             if missing:
                 return "", f"Missing data files: {missing}"
-        
+
         # Write to persistent location
         exec_id = uuid.uuid4().hex[:8]
         exec_path = self.exec_dir / f"exec_{exec_id}.py"
         exec_path.write_text(code_script, encoding='utf-8')
-        
+
         try:
             result = subprocess.run(
                 [sys.executable, str(exec_path)],
@@ -365,7 +530,7 @@ class DS_STAR_Agent:
                 timeout=self.config.execution_timeout,
                 cwd=Path.cwd()
             )
-            
+
             if result.returncode == 0:
                 self.controller.logger.info("Execution successful")
                 return result.stdout, None
@@ -373,7 +538,7 @@ class DS_STAR_Agent:
                 error_msg = result.stderr or "Unknown execution error"
                 self.controller.logger.error(f"Execution failed: {error_msg}")
                 return "", error_msg
-                
+
         except subprocess.TimeoutExpired:
             return "", f"Timeout after {self.config.execution_timeout}s"
         except Exception as e:
@@ -394,25 +559,75 @@ class DS_STAR_Agent:
             self.controller.logger.fatal(f"Execution error: {error}")
         return code, exec_result
 
+    ############################# add agent classify query ########################
+    def classify_query(self, query: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["query_classifier"].format(
+            question=query
+        )
+
+        result = self.controller.execute_step(
+            "query_classifier",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "QUERY_CLASSIFIER",
+                prompt,
+                temperature=0,
+                format=QUERY_CLASSIFIER_SCHEMA
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_query_classifier_json(result)
+    #######################################################
 
     def analyze_data(self, filename: str) -> Dict[str, str]:
         prompt = PROMPT_TEMPLATES["analyzer"].format(filename=filename)
-        
+
         result = self.controller.execute_step(
             "analyzer",
             step_func=lambda prompt=prompt, **kwargs: self._call_model("ANALYZER", prompt),  # FIXED
             prompt=prompt,
             filename=filename
         )
-        
+
         code = self._extract_code_block(result)
         code, exec_result = self._execute_and_debug_code(code, [filename], data_desc="")
 
         return {"code": code, "result": exec_result, "filename": filename}
 
-    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], last_result: Optional[str], verifier_feedback=None) -> str:
+
+
+
+
+  ################################### ADD for analyze task agent
+    def analyze_tasks(self, query: str, data_desc: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["task_analyzer"].format(
+            question=query,
+            summaries=data_desc
+        )
+
+        result = self.controller.execute_step(
+            "task_analyzer",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "TASK_ANALYZER",
+                prompt,
+                temperature=0,
+                format=TASK_ANALYZER_SCHEMA
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_task_analysis_json(result)
+
+    ###################################
+
+    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], last_result: Optional[str], verifier_feedback=None,task_analysis=None) -> str:
+        ### add below
+        task_analysis_str = json.dumps(task_analysis, indent=2, ensure_ascii=False) if task_analysis else "{}"
+
         if not current_plan:
-            prompt = PROMPT_TEMPLATES["planner_init"].format(question=query, summaries=data_desc,verifier_feedback=verifier_feedback)
+            prompt = PROMPT_TEMPLATES["planner_init"].format(question=query, summaries=data_desc,verifier_feedback=verifier_feedback,task_analysis=task_analysis_str)
             step_type = "planner_init"
         else:
             plan_str = "\n".join(f"{i+1}. {step}" for i, step in enumerate(current_plan))
@@ -422,10 +637,11 @@ class DS_STAR_Agent:
                   plan=plan_str,
                   result=last_result,
                   current_step=current_plan[-1],
-                  verifier_feedback=verifier_feedback
+                  verifier_feedback=verifier_feedback,
+                  task_analysis=task_analysis_str
             )
             step_type = "planner_next"
-        
+
         return self.controller.execute_step(
             step_type,
             step_func=lambda prompt=prompt, **kwargs: self._call_model("PLANNER", prompt),  # FIXED
@@ -436,7 +652,7 @@ class DS_STAR_Agent:
 
     def generate_code(self, plan: List[str], data_desc: str, base_code: Optional[str] = None) -> str:
         plan_str = "\n".join(f"{i+1}. {step}" for i, step in enumerate(plan))
-        
+
         if not base_code:
             prompt = PROMPT_TEMPLATES["coder_init"].format(
                 summaries=data_desc, plan=plan_str
@@ -446,7 +662,7 @@ class DS_STAR_Agent:
                 summaries=data_desc, base_code=base_code,
                 plan=plan_str, current_plan=plan[-1]
             )
-        
+
         result = self.controller.execute_step(
             "coder",
             step_func=lambda prompt=prompt, **kwargs: self._call_model("CODER", prompt),  # FIXED
@@ -454,7 +670,7 @@ class DS_STAR_Agent:
             plan_length=len(plan),
             has_base_code=base_code is not None
         )
-        
+
         return self._extract_code_block(result)
 
     def verify_plan(self, plan: List[str], code: str, result: str, query: str, data_desc: str) -> str:
@@ -462,10 +678,10 @@ class DS_STAR_Agent:
         prompt = PROMPT_TEMPLATES["verifier"].format(
             plan=plan_str, code=code, result=result, question=query, summaries=data_desc, current_step=plan[-1]
         )
-        
+
         return self.controller.execute_step(
             "verifier",
-            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt),  # FIXED
+            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt,temperature=0,format=VERIFIER_SCHEMA),  # FIXED
             prompt=prompt,
             plan_length=len(plan)
         ).strip()
@@ -476,7 +692,7 @@ class DS_STAR_Agent:
             question=query, summaries=data_desc,
             plan=plan_str, result=result, current_step=plan[-1]
         )
-        
+
         return self.controller.execute_step(
             "router",
             step_func=lambda prompt=prompt, **kwargs: self._call_model("ROUTER", prompt),  # FIXED
@@ -489,150 +705,100 @@ class DS_STAR_Agent:
             summaries=data_desc, code=code,
             bug=error, filenames=", ".join(filenames)
         )
-        
+
         result = self.controller.execute_step(
             "debugger",
             step_func=lambda prompt=prompt, **kwargs: self._call_model("DEBUGGER", prompt),  # FIXED
             prompt=prompt,
             error_type=error.split(":")[0]
         )
-        
+
         return self._extract_code_block(result)
 
-    def finalize_solution(self, code: str, result: str, query: str, 
+    def finalize_solution(self, code: str, result: str, query: str,
                         guidelines: str, data_desc: str) -> str:
         prompt = PROMPT_TEMPLATES["finalyzer"].format(
             summaries=data_desc, code=code,
             result=result, question=query, guidelines=guidelines
         )
-        
+
         result = self.controller.execute_step(
             "finalyzer",
             step_func=lambda prompt=prompt, **kwargs: self._call_model("FINALYZER", prompt),  # FIXED
             prompt=prompt
         )
-        
+
         return self._extract_code_block(result)
 
-    def is_profile_supported(self, file_path: str) -> bool:
-        ext = Path(file_path).suffix.lower()
-        return ext in [".csv", ".xlsx", ".xls", ".json"]
-
-    def load_dataframe(self, file_path: str) -> pd.DataFrame:
-        ext = Path(file_path).suffix.lower()
-        try:
-            if ext == ".csv":
-                return pd.read_csv(file_path)
-            elif ext in [".xlsx", ".xls"]:
-                return pd.read_excel(file_path)
-            elif ext == ".json":
-                with open(file_path, "r") as f:
-                    data = json.load(f)
-                return pd.json_normalize(data)
-            else:
-                raise ValueError(f"Unsupported file format: {ext}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load {file_path}: {e}")
-
-    def extract_profile_summary(self, profile_json):
-        """
-        Keep only:
-        - table
-        - alerts
-        """
-        if isinstance(profile_json, str):
-            profile = json.loads(profile_json)
-        else:
-            profile = profile_json
-
-        return {
-            "table": profile.get("table", {}),
-            "alerts": profile.get("alerts", [])
-        }
     def run_pipeline(self, query: str, data_files: List[str]) -> Dict[str, Any]:
         """Main pipeline with full persistence and resume capability."""
         self.controller.logger.info(f"Starting pipeline: {self.config.run_id}")
         self.controller.logger.info(f"Query: {query}")
         self.controller.logger.info(f"Data files: {data_files}")
-        
+
         # Check for resume state
         state = self.storage.get_current_state()
         if state["completed_steps"]:
             self.controller.logger.info(f"Resuming from step {state['current_step']}")
-        
+
         # Ensure data directory exists
         Path(self.config.data_dir).mkdir(exist_ok=True)
-        
+
         # Initialize variables that might be loaded from previous runs
         code = None
         exec_result = None
-        
+
+
+        # PHASE 0: Check the query (follow up or not)
+        ##### Check the query class
+        if not state.get("query_classified", False):
+            query_classification = self.classify_query(query)
+
+            state = self.storage.get_current_state()
+            state["query_classification"] = query_classification
+            state["query_classified"] = True
+            self.storage.save_state(state)
+        else:
+            query_classification = state["query_classification"]
+
         # PHASE 1: Data Analysis
-        if self.controller.should_execute_step(0):
+
+        ## 
+        state = self.storage.get_current_state()
+
+        #if self.controller.should_execute_step(0):
+        if not state.get("phase1_done", False):
             self.controller.logger.info("=== PHASE 1: ANALYZING DATA FILES ===")
             data_descriptions = {}
             absolute_data_files = []
-            profiles_dir =  self.storage.run_dir / "profiles"
-            profiles_dir.mkdir(parents=True, exist_ok=True)
             for i, f in enumerate(data_files):
                 self.controller.logger.info(f"Analyzing {f}...")
                 abs_path = str(Path(self.config.data_dir).joinpath(f).resolve())
-                print("abs_path:",abs_path)
                 absolute_data_files.append(abs_path)
                 analysis = self.analyze_data(abs_path)
-                profile_summary = None
-                html_path = None
-                if self.is_profile_supported(abs_path):
-                    try:
-                        df = self.load_dataframe(abs_path)
-                        profile = ProfileReport(
-                            df,
-                            title=f"Profiling Report - {Path(f).stem}",
-                            explorative=True
-                        )
-                        # Save HTML full report
-                        html_path = profiles_dir / f"{Path(f).stem}.html"
-                        print("html_path", html_path)
-                        profile.to_file(html_path)
-                        # Extract summary JSON
-                        profile_json = profile.to_json()
-                        profile_summary = self.extract_profile_summary(profile_json)
-                        print("profile_summary",profile_summary)
-                    except Exception as e:
-                        self.controller.logger.warning(
-                            f"Profiling failed for {f}: {e}"
-                        )
-                else:
-                    self.controller.logger.info(
-                        f"Skipping profiling for unsupported file type: {f}"
-                    )
-                data_descriptions[abs_path] = {
-                    "analysis": analysis["result"],
-                    "profile_summary": profile_summary,
-                }
+                data_descriptions[abs_path] = analysis["result"]
+
             state = self.storage.get_current_state()
             state["data_descriptions"] = data_descriptions
+            state["phase1_done"] = True
             self.storage.save_state(state)
-
         else:
             # Load from previous run
-            state = self.storage.get_current_state()
             data_descriptions = state["data_descriptions"]
             absolute_data_files = list(data_descriptions.keys())
 
-        data_desc_str = "\n\n".join([
-            f"""=========================================
-            Full Path: {k}
-            =========================================
+        data_desc_str = "\n".join([f"File: {k}\n{v}" for k, v in data_descriptions.items()])
 
-            [1. ANALYSIS]
-            {v.get('analysis', '')}
-            [2. PROFILE SUMMARY]
-            {json.dumps(v.get('profile_summary') or {}, indent=2)}
-            """
-                for k, v in data_descriptions.items()
-            ])
-        
+        #### add ####################
+        task_analysis = self.analyze_tasks(query, data_desc_str)
+
+        state = self.storage.get_current_state()
+        state["task_analysis"] = task_analysis
+        self.storage.save_state(state)
+
+
+######################################
+
         # PHASE 2: Iterative Planning & Execution
         # Use explicit phase flag instead of step-index math, which broke
         # whenever the Analyzer's code needed debugging (extra steps shifted
@@ -641,15 +807,15 @@ class DS_STAR_Agent:
         if not state.get("phase2_done", False):
             self.controller.logger.info("=== PHASE 2: ITERATIVE PLANNING & VERIFICATION ===")
             plan = []
-            plan.append(self.plan_next_step(query, data_desc_str, plan, ""))
-            
+            plan.append(self.plan_next_step(query, data_desc_str, plan, "",task_analysis=task_analysis))
+
             code = self.generate_code(plan, data_desc_str)
             code, exec_result = self._execute_and_debug_code(code, absolute_data_files, data_desc_str)
-            
+
             # Refinement rounds
             for round_idx in range(self.config.max_refinement_rounds):
                 self.controller.logger.info(f"--- Refinement Round {round_idx+1} ---")
-                
+
                 ## CHANGED WITH BELLOWverdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
                 verdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
                 verdict_json = self._parse_verifier_json(verdict)
@@ -659,9 +825,9 @@ class DS_STAR_Agent:
                 if verdict_json.get("is_complete", False):
                     self.controller.logger.info("Plan verified as sufficient!")
                     break
-                
+
                 routing = self.route_plan(plan, query, exec_result, data_desc_str)
-                
+
                 if "is wrong!" in routing:
                     # Truncate plan and retry
                     try:
@@ -672,14 +838,14 @@ class DS_STAR_Agent:
                         plan = []
                 else:
                     self.controller.logger.info("Adding new step...")
-                
+
                 # Generate next step
                 #####   ΑΛΛΑΓΗ ΓΙΑ VERIFIER->PLANNER INFO:next_plan = self.plan_next_step(query, data_desc_str, plan, exec_result)
                 verifier_feedback = json.dumps(verdict_json,indent=2, ensure_ascii=False)
-                next_plan = self.plan_next_step(query,data_desc_str,plan, exec_result,verifier_feedback=verifier_feedback)
+                next_plan = self.plan_next_step(query,data_desc_str,plan, exec_result,verifier_feedback=verifier_feedback,task_analysis=task_analysis)
                 #####################################
                 plan.append(next_plan)
-                
+
                 # Generate and execute new code
                 code = self.generate_code(plan, data_desc_str, base_code=code)
                 code, exec_result = self._execute_and_debug_code(code, absolute_data_files, data_desc_str)
@@ -710,15 +876,15 @@ class DS_STAR_Agent:
             "Format as JSON with key 'final_answer'",
             data_desc_str
         )
-        
+
         final_code, final_result = self._execute_and_debug_code(final_code, absolute_data_files, data_desc_str)
-        
+
         # Save final output
         output_file = self.storage.run_dir / "final_output" / "result.json"
         output_file.write_text(final_result)
-        
+
         self.controller.logger.info("Pipeline completed successfully!")
-        
+
         return {
             "run_id": self.config.run_id,
             "final_result": final_result,
@@ -732,7 +898,7 @@ class DS_STAR_Agent:
 def main():
     """CLI interface with resume and edit capabilities."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="DS-STAR Data Science Agent")
     parser.add_argument("--resume", type=str, help="Resume from run ID")
     parser.add_argument("--interactive", action="store_true", help="Pause between steps")
@@ -749,7 +915,7 @@ def main():
             config_defaults = yaml.safe_load(f) or {}
     except FileNotFoundError:
         config_defaults = {}
-    
+
     # Combine config sources (CLI args take precedence)
     config_params = {
         'run_id': args.resume or config_defaults.get('run_id'),
@@ -758,16 +924,16 @@ def main():
         'model_name': config_defaults.get('model_name'),
         'preserve_artifacts': config_defaults.get('preserve_artifacts', True)
     }
-    
+
     # Filter out None values so dataclass defaults are used
     config_params = {k: v for k, v in config_params.items() if v is not None}
-    
+
     config = DSConfig(**config_params)
     if not config.model_name:
         parser.error("Model name must be specified via config file.")
-    
+
     agent = DS_STAR_Agent(config)
-    
+
     # Edit mode
     if args.edit_last and config.run_id:
         agent.controller.edit_last_step_code()

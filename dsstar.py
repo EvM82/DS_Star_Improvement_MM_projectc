@@ -106,7 +106,7 @@ class ArtifactStorage:
         step_dir = step_dirs[0]
         return {
             "prompt": (step_dir / "prompt.md").read_text(encoding='utf-8'),
-            "code": (step_dir / "code.py").read_text(encoding='utf-8') 
+            "code": (step_dir / "code.py").read_text(encoding='utf-8')
                    if (step_dir / "code.py").exists() else None,
             "result": (step_dir / "result.txt").read_text(encoding='utf-8'),
             "metadata": json.loads((step_dir / "metadata.json").read_text())
@@ -247,8 +247,8 @@ class DS_STAR_Agent:
         self.db_setup.create_history()
         
         # List of known agents
-        agents = ["ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
-        
+        agents = ["ANALYZER", "QUERY_CLASSIFIER", "CONTEXTUALIZER", "TASK_ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
+
         def get_provider_for_model(model_name: str, config: DSConfig) -> ModelProvider:
             provider_cls = None
             for provider in [OllamaProvider, OpenAIProvider, GeminiProvider]:
@@ -298,11 +298,16 @@ class DS_STAR_Agent:
         
         atexit.register(lambda: self.log_file.close())
     
-    def _call_model(self, agent_name: str, prompt: str) -> str:
+    def _call_model(self, agent_name: str, prompt: str, temperature=None, format=None) -> str:
         """Call the appropriate model provider for the agent."""
         try:
             provider = self.providers[agent_name]
-            response_text = provider.generate_content(prompt)
+            #response_text = provider.generate_content(prompt)
+            response_text = provider.generate_content(
+                prompt,
+                temperature=temperature,
+                format=format
+            )
             self.controller.logger.info(f"[{agent_name}] Response received ({len(response_text)} chars)")
             return response_text
         except Exception as e:
@@ -317,7 +322,7 @@ class DS_STAR_Agent:
     
 
 
-  ####################### ADD FUNCTION #########################
+  ####################### ADD parse FUNCTION for verifier, Task Analyzer, Query Classifier #########################
     def _parse_verifier_json(self, verdict: str) -> dict:
       try:
           return json.loads(verdict)
@@ -331,9 +336,42 @@ class DS_STAR_Agent:
               "reason": verdict
           }
 
-  ####################################################
+    def _parse_task_analysis_json(self, task_analysis: str) -> dict:
+        try:
+            return json.loads(task_analysis)
+        except Exception:
+            return {
+                "primary_task": "unknown",
+                "secondary_tasks": [],
+                "requires_machine_learning": False,
+                "ml_problem_type": "unknown",
+                "target_column": None,
+                "requested_outputs": [],
+                "planning_hints": [],
+                "reason": task_analysis
+            }
 
 
+    def _parse_query_classifier_json(self, result: str) -> dict:
+        try:
+            return json.loads(result)
+        except Exception:
+            return {
+               "query_type": "follow_up"
+            }
+
+
+    def _parse_contextualizer_json(self, result: str) -> dict:
+        try:
+            return json.loads(result)
+        except Exception:
+            return {
+                "standalone_question": result,
+                "used_history": False,
+                "reason": "Failed to parse contextualizer JSON."
+            }
+
+##############################################################################
 
 
     def _execute_code(self, code_script: str, data_files: Optional[List[str]] = None) -> Tuple[str, Optional[str]]:
@@ -396,6 +434,24 @@ class DS_STAR_Agent:
             self.controller.logger.fatal(f"Execution error: {error}")
         return code, exec_result
 
+    def classify_query(self, query: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["query_classifier"].format(
+            question=query
+        )
+
+        result = self.controller.execute_step(
+            "query_classifier",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "QUERY_CLASSIFIER",
+                prompt,
+                temperature=0,
+                format=PROMPT_TEMPLATES["query_classifier_schema"]
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_query_classifier_json(result)
 
     def analyze_data(self, filename: str) -> Dict[str, str]:
         prompt = PROMPT_TEMPLATES["analyzer"].format(filename=filename)
@@ -411,10 +467,51 @@ class DS_STAR_Agent:
         code, exec_result = self._execute_and_debug_code(code, [filename], data_desc="")
 
         return {"code": code, "result": exec_result, "filename": filename}
+    
+    def analyze_tasks(self, query: str, data_desc: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["task_analyzer"].format(
+            question=query,
+            summaries=data_desc
+        )
 
-    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], formated_history_result: str, last_result: Optional[str], verifier_feedback=None) -> str:
+        result = self.controller.execute_step(
+            "task_analyzer",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "TASK_ANALYZER",
+                prompt,
+                temperature=0,
+                format=PROMPT_TEMPLATES["task_analyzer_schema"]
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_task_analysis_json(result)
+
+    def contextualize_query(self, query: str, history: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["contextualizer"].format(
+            question=query,
+            history=history
+        )
+
+        result = self.controller.execute_step(
+            "contextualizer",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "CONTEXTUALIZER",
+                prompt,
+                temperature=0,
+                format=PROMPT_TEMPLATES["contextualizer_schema"]
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_contextualizer_json(result)
+
+    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], formated_history_result: str, last_result: Optional[str], verifier_feedback=None, task_analysis=None) -> str:
+        task_analysis_str = json.dumps(task_analysis, indent=2, ensure_ascii=False) if task_analysis else "{}"
         if not current_plan:
-            prompt = PROMPT_TEMPLATES["planner_init"].format(chat_history=formated_history_result, question=query, summaries=data_desc,verifier_feedback=verifier_feedback)
+            prompt = PROMPT_TEMPLATES["planner_init"].format(chat_history=formated_history_result, question=query, summaries=data_desc,verifier_feedback=verifier_feedback,task_analysis=task_analysis_str)
             step_type = "planner_init"
         else:
             plan_str = "\n".join(f"{i+1}. {step}" for i, step in enumerate(current_plan))
@@ -425,7 +522,8 @@ class DS_STAR_Agent:
                   plan=plan_str,
                   result=last_result,
                   current_step=current_plan[-1],
-                  verifier_feedback=verifier_feedback
+                  verifier_feedback=verifier_feedback,
+                  task_analysis=task_analysis_str
             )
             step_type = "planner_next"
         
@@ -468,7 +566,7 @@ class DS_STAR_Agent:
         
         return self.controller.execute_step(
             "verifier",
-            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt),  # FIXED
+            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt,temperature=0,format=PROMPT_TEMPLATES["verifier_schema"]),  # FIXED
             prompt=prompt,
             plan_length=len(plan)
         ).strip()
@@ -502,7 +600,7 @@ class DS_STAR_Agent:
         
         return self._extract_code_block(result)
 
-    def finalize_solution(self, code: str, result: str, query: str, 
+    def finalize_solution(self, code: str, result: str, query: str,
                         guidelines: str, data_desc: str) -> str:
         prompt = PROMPT_TEMPLATES["finalyzer"].format(
             summaries=data_desc, code=code,
@@ -622,13 +720,46 @@ class DS_STAR_Agent:
         code = None
         exec_result = None
         history_result=self.db_setup.get_latest_chat_history(self.db_manager, conversation_id)
-        print("CHAT HISTORY:")
-        print(history_result)
+        # print("CHAT HISTORY:")
+        # print(history_result)
         formated_history_result=self.format_chat_history_for_llm(history_result)
         self.controller.logger.info(f"Chat History: {formated_history_result}")
         
-        # PHASE 1: Data Analysis
-        if self.controller.should_execute_step(0):
+        # PHASE 0: Check the query (follow up or not)
+        ##### Check the query class
+        original_query = query
+        if not state.get("query_classified", False):
+            query_classification = self.classify_query(query)
+
+            state = self.storage.get_current_state()
+            state["query_classification"] = query_classification
+            state["query_classified"] = True
+            state["original_query"] = original_query
+            self.storage.save_state(state)
+        else:
+            query_classification = state["query_classification"]
+        query_type = query_classification.get("query_type")    
+        print("Query type:", query_type)
+        if query_type == "follow_up":
+            contextualized = self.contextualize_query(query, formated_history_result)
+            print("\nORIGINAL QUERY:")
+            print(query)
+            print("\nCONTEXTUALIZED:")
+            print(contextualized)
+            query = contextualized["standalone_question"]
+            state = self.storage.get_current_state()
+            state["contextualized_query"] = contextualized
+            state["final_query"] = query
+            self.storage.save_state(state)
+        else:
+            state = self.storage.get_current_state()
+            state["final_query"] = query
+            self.storage.save_state(state)
+
+        # PHASE 1: Data Analysis#
+        state = self.storage.get_current_state()
+        #if self.controller.should_execute_step(0):
+        if not state.get("phase1_done", False):
             self.controller.logger.info("=== PHASE 1: ANALYZING DATA FILES ===")
             data_descriptions = {}
             absolute_data_files = []
@@ -672,17 +803,21 @@ class DS_STAR_Agent:
                 }
             state = self.storage.get_current_state()
             state["data_descriptions"] = data_descriptions
+            state["phase1_done"] = True
             self.storage.save_state(state)
-
         else:
             # Load from previous run
-            state = self.storage.get_current_state()
             data_descriptions = state["data_descriptions"]
             absolute_data_files = list(data_descriptions.keys())
 
         data_desc_profiles_str = self.format_data_profiles_for_llm(data_descriptions)
         data_desc_str = "\n".join([f"File: {k}\n{v.get('analysis', '')}" for k, v in data_descriptions.items()])
         
+        task_analysis = self.analyze_tasks(query, data_desc_str)
+        state = self.storage.get_current_state()
+        state["task_analysis"] = task_analysis
+        self.storage.save_state(state)
+
         # PHASE 2: Iterative Planning & Execution
         # Use explicit phase flag instead of step-index math, which broke
         # whenever the Analyzer's code needed debugging (extra steps shifted
@@ -691,7 +826,7 @@ class DS_STAR_Agent:
         if not state.get("phase2_done", False):
             self.controller.logger.info("=== PHASE 2: ITERATIVE PLANNING & VERIFICATION ===")
             plan = []
-            plan.append(self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, ""))
+            plan.append(self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, "", task_analysis=task_analysis))
             
             code = self.generate_code(plan, data_desc_str)
             code, exec_result = self._execute_and_debug_code(code, absolute_data_files, data_desc_str)
@@ -722,7 +857,7 @@ class DS_STAR_Agent:
                 
                 # Generate next step
                 verifier_feedback = json.dumps(verdict_json,indent=2, ensure_ascii=False)
-                next_plan = self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, exec_result, verifier_feedback=verifier_feedback)
+                next_plan = self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, exec_result, verifier_feedback=verifier_feedback,task_analysis=task_analysis)
                 plan.append(next_plan)
                 
                 # Generate and execute new code
@@ -757,7 +892,7 @@ class DS_STAR_Agent:
         )
         
         final_code, final_result = self._execute_and_debug_code(final_code, absolute_data_files, data_desc_str)
-        self.db_setup.insert_chat_record(self.db_manager, conversation_id, self.config.run_id, "standalone", query, final_result, data_files)
+        self.db_setup.insert_chat_record(self.db_manager, conversation_id, self.config.run_id, query_type, query, final_result, data_files)
         
         # Save final output
         output_file = self.storage.run_dir / "final_output" / "result.json"

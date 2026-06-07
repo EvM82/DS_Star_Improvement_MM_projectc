@@ -1,3 +1,241 @@
+query_classifier_schema:
+  type: object
+  properties:
+    query_type:
+      type: string
+      enum:
+        - standalone
+        - follow_up
+  required:
+    - query_type
+  additionalProperties: false
+
+verifier_schema:
+  type: object
+  properties:
+    is_complete:
+      type: boolean
+    answered_requirements:
+      type: array
+      items:
+        type: string
+    missing_requirements:
+      type: array
+      items:
+        type: string
+    execution_errors:
+      type: array
+      items:
+        type: string
+    next_recommended_step:
+      type: string
+    reason:
+      type: string
+  required:
+    - is_complete
+    - answered_requirements
+    - missing_requirements
+    - execution_errors
+    - next_recommended_step
+    - reason
+  additionalProperties: false
+
+
+task_analyzer_schema:
+  type: object
+  properties:
+    primary_task:
+      type: string
+      enum:
+        - eda
+        - visualization
+        - classification
+        - regression
+        - clustering
+        - data_cleaning
+        - statistical_analysis
+        - unknown
+
+    secondary_tasks:
+      type: array
+      items:
+        type: string
+        enum:
+          - eda
+          - visualization
+          - classification
+          - regression
+          - clustering
+          - data_cleaning
+          - statistical_analysis
+          - unknown
+
+    requires_machine_learning:
+      type: boolean
+
+    ml_problem_type:
+      type: string
+      enum:
+        - classification
+        - regression
+        - clustering
+        - none
+        - unknown
+
+    target_column:
+      type:
+        - string
+        - "null"
+
+    requested_outputs:
+      type: array
+      items:
+        type: string
+
+    planning_hints:
+      type: array
+      items:
+        type: string
+
+  required:
+    - primary_task
+    - secondary_tasks
+    - requires_machine_learning
+    - ml_problem_type
+    - target_column
+    - requested_outputs
+    - planning_hints
+
+  additionalProperties: false
+
+
+contextualizer_schema:
+  type: object
+  properties:
+    standalone_question:
+      type: string
+
+  required:
+    - standalone_question
+
+  additionalProperties: false
+
+
+query_classifier: |
+  You are a conversation continuity classifier.
+
+  Your task is to determine whether the user's question should continue an existing conversation
+  or start a new conversation.
+
+  Definitions:
+
+  - standalone:
+    The question can start a new conversation thread.
+    It does not require previous messages, previous code, previous outputs,
+    previous analysis, or previous discussion.
+
+  - follow_up:
+    The question refers to, depends on, or is a continuation of previous conversation context.
+
+  Important rules:
+
+  - A question is NOT follow_up simply because it requires a dataset, file, image, or other input.
+  - Missing information does NOT imply follow_up.
+  -- Missing conversational reference caused by pronouns like "it", "its", "this", or "that" DOES imply follow_up.
+  - Only classify as follow_up when previous conversation context would be useful or necessary.
+  -- If the question contains pronouns or vague references such as "it", "its", "this", "that", "these", "those", classify it as "follow_up", unless the referenced object is explicitly named in the question.
+
+  Common follow_up indicators:
+  - continue
+  - previous
+  - above
+  - earlier
+  - same dataset
+  - same code
+  - compare with before
+  - now
+  - again
+  - this
+  - that
+  - these results
+  - this plot
+  - fix it
+  - improve it
+  - what about this
+
+  Examples:
+
+  User: "Analyze this dataset"
+  -> standalone
+
+  User: "Find the target variable"
+  -> standalone
+
+  User: "Create a random forest model"
+  -> standalone
+
+  User: "Continue the analysis"
+  -> follow_up
+
+  User: "Compare with the previous results"
+  -> follow_up
+
+  User: "Is this correct?"
+  -> follow_up
+
+  User: "Now try XGBoost"
+  -> follow_up
+
+  User: "What is its distribution?"
+  -> follow_up
+
+  User: "Show its distribution"
+  -> follow_up
+
+  User: "Is it balanced?"
+  -> follow_up
+
+  User: "What about that?"
+  -> follow_up
+
+  User question:
+  {question}
+
+  Return only valid JSON:
+
+  {{
+    "query_type": "standalone | follow_up"
+  }}
+
+
+
+
+contextualizer: |
+  You are a query contextualization agent.
+
+  Your task is to rewrite a follow-up user question into a complete standalone question using the provided chat history.
+
+  Chat history:
+  {history}
+
+  Current user question:
+  {question}
+
+  Return only valid JSON:
+
+  {{
+    "standalone_question": "complete standalone question",
+  }}
+
+  Rules:
+  - Do not answer the question.
+  - Only rewrite the question.
+  - Preserve the user's original intent.
+  - If the question is already standalone, return it unchanged.
+  - Return JSON only.
+
+
+
 analyzer: |
   You are an expert data analysist.
   Generate a Python code that loads and describes the content of {filename}.
@@ -27,11 +265,15 @@ planner_init: |
   Below are metadata profiles of the available data. Note: Profiles are optional and may not be present for every file.
   {summaries}
 
+  # TASK ANALYSIS
+  {task_analysis}
+
   # PLANNING INSTRUCTIONS
-  Analyze the user question, conversation context, and any provided data profiles to formulate your initial step.
-  When formulating your initial step, you MUST thoroughly analyze the provided data. Specifically:
+  Analyze the user question, conversation context, any provided data profiles and the TASK ANALYSIS section, to formulate your initial step.
+  Specifically:
   1. Look at [1. ANALYSIS] to understand the general purpose and context of the file.
-  2. If data profiles are provided, examine [2. DATA PROFILE], leverage them to ensure your step is realistic. Pay attention to:
+  2. Check `primary_task` , `secondary_tasks` and the `planning_hints` in the TASK ANALYSIS section to scope your overall approach.
+  3.  If data profiles are provided, examine [2. DATA PROFILE], leverage them to ensure your step is realistic. Pay attention to:
     - **Correlations & Alerts:** Highly correlated fields, uniform distributions, or unique identifiers that can affect features or join logic.
     - **Structural Data:** Incorrect data types (e.g., numbers stored as strings) requiring casting.
     - **Data Quality:** Missing values (NaNs) or duplicates that require immediate cleanup.
@@ -43,6 +285,42 @@ planner_init: |
 
   # OUTPUT FORMAT
   Your response must contain ONLY the description of this initial step. Do not include any explanations.
+
+
+task_analyzer: |
+  You are an expert data analysis task classifier.
+
+  Your job is to analyze the user's question and the available dataset summary.
+  Do not write code.
+  Do not create a step-by-step plan.
+  Instead, identify what kinds of tasks are required.
+
+  # Question
+  {question}
+
+  # Given data
+  {summaries}
+
+  Return JSON only with exactly this schema:
+
+  {{
+    "primary_task": "eda | visualization | classification | regression | clustering | data_cleaning | statistical_analysis | unknown",
+    "secondary_tasks": ["list of additional task types"],
+    "requires_machine_learning": true,
+    "ml_problem_type": "classification | regression | clustering | none | unknown",
+    "target_column": "column name if clearly identifiable, otherwise null",
+    "requested_outputs": ["what the final answer should contain"],
+    "planning_hints": ["short useful hints for the planner"],
+  }}
+
+  Rules:
+  - A question may contain multiple tasks.
+  - Do not force the question into only one task.
+  - If something is uncertain, use "unknown" or null.
+  - Return valid JSON only.
+  - Do not include markdown.
+
+
 planner_next: |
   You are an expert Data Analyst.
   Your task is to suggest the next plan step needed to answer the question.
@@ -57,6 +335,9 @@ planner_next: |
 
   # PROVIDED DATA PROFILES & SUMMARIES
   {summaries}
+
+  # TASK ANALYSIS
+  {task_analysis}
 
   # CURRENT PLANS
   {plan}
@@ -75,7 +356,7 @@ planner_next: |
   Suggest one concrete next step only.
   Your response should only contain the next step without any explanation.
 coder_init: |
-  # Given data: 
+  # Given data:
   {summaries}
   # Plan
   {plan}
@@ -86,12 +367,12 @@ coder_init: |
 coder_next: |
   You are an expert data analysist.
   Your task is to implement the next plan with the given data.
-  # Given data: 
+  # Given data:
   {summaries}
   # Base code
   python
   {base_code}
-  
+
   # Previous plans
   {plan}
   # Current plan to implement
@@ -108,9 +389,9 @@ verifier: |
   answer the question.
   # Question
   {question}
-  # Given data: 
+  # Given data:
   {summaries}
-  # Plan  
+  # Plan
   {plan}
   # Current step
   {current_step}

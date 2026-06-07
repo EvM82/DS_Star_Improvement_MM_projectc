@@ -13,7 +13,9 @@ import yaml
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from provider import ModelProvider, GeminiProvider, OllamaProvider, OpenAIProvider
-
+import textwrap
+from db_conn import ConnectionManager
+from db_tables import DatabaseSetup
 # =============================================================================
 # CONFIGURATION & PROMPT TEMPLATES
 # =============================================================================
@@ -40,8 +42,6 @@ class DSConfig:
     agent_models: Dict[str, str] = field(default_factory=dict)
     
     def __post_init__(self):
-        if self.run_id is None:
-            self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:6]}"
         if self.agent_models is None:
             self.agent_models = {}
 
@@ -57,7 +57,7 @@ class ArtifactStorage:
     
     def __init__(self, config: DSConfig):
         self.config = config
-        self.run_dir = Path(config.runs_dir) / config.run_id
+        self.run_dir = Path(config.runs_dir) / str(config.run_id)
         self._setup_directories()
         
     def _setup_directories(self):
@@ -242,6 +242,9 @@ class DS_STAR_Agent:
         # Initialize providers for each agent type
         self.providers = {}
         default_model = config.model_name
+        self.db_manager = ConnectionManager()
+        self.db_setup = DatabaseSetup(self.db_manager)
+        self.db_setup.create_history()
         
         # List of known agents
         agents = ["ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
@@ -264,9 +267,8 @@ class DS_STAR_Agent:
             self.controller.logger.info(f"Initialized {agent} with model: {model_name}")
         
         # Setup execution environment
-        self.exec_dir = Path(config.runs_dir) / config.run_id / "exec_env"
+        self.exec_dir = Path(config.runs_dir) / str(config.run_id) / "exec_env"
         self.exec_dir.mkdir(exist_ok=True)
-        
         self._setup_tee_logging()
         
     def _setup_tee_logging(self):
@@ -410,13 +412,14 @@ class DS_STAR_Agent:
 
         return {"code": code, "result": exec_result, "filename": filename}
 
-    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], last_result: Optional[str], verifier_feedback=None) -> str:
+    def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], formated_history_result: str, last_result: Optional[str], verifier_feedback=None) -> str:
         if not current_plan:
-            prompt = PROMPT_TEMPLATES["planner_init"].format(question=query, summaries=data_desc,verifier_feedback=verifier_feedback)
+            prompt = PROMPT_TEMPLATES["planner_init"].format(chat_history=formated_history_result, question=query, summaries=data_desc,verifier_feedback=verifier_feedback)
             step_type = "planner_init"
         else:
             plan_str = "\n".join(f"{i+1}. {step}" for i, step in enumerate(current_plan))
             prompt = PROMPT_TEMPLATES["planner_next"].format(
+                  chat_history=formated_history_result,
                   question=query,
                   summaries=data_desc,
                   plan=plan_str,
@@ -549,11 +552,63 @@ class DS_STAR_Agent:
             "table": profile.get("table", {}),
             "alerts": profile.get("alerts", [])
         }
+    
+    def format_chat_history_for_llm(self, records: List[Dict[str, Any]]) -> str:
+        """
+        Takes raw database records, reverses them to chronological order, 
+        and formats them into a clean string for the LLM prompt.
+        """
+        if not records:
+            return "No previous conversation history available."
+
+        formatted_turns = []
+        # chronological ordering: reverse the list so old records come before new ones
+        chronological_records = reversed(records)
+        for record in chronological_records:
+            user_query = record.get("user_query", "").strip()
+            answer = record.get("answer", "").strip()
+            turn_str = f"User: {user_query}\nAssistant: {answer}"
+            formatted_turns.append(turn_str)
+        return "\n\n".join(formatted_turns)
+    
+    def format_data_profiles_for_llm(self, data_descriptions: Dict[str, Dict[str, Any]]) -> str:
+        """
+        Formats the raw data descriptions and profile JSON dictionaries 
+        into a structured, flush Markdown string for LLM readability.
+        """
+        if not data_descriptions:
+            return "No data profiles or summaries available."
+        profile_blocks = []
+        for filepath, content in data_descriptions.items():
+            analysis = content.get('analysis', '').strip()
+            profile_summary = content.get('profile_summary') or {}
+            json_profile_str = json.dumps(profile_summary, indent=2)
+            
+            raw_block = f"""
+            ---
+            ### File: {filepath}
+            
+            #### [1. ANALYSIS]
+            {analysis}
+            
+            #### [2. DATA PROFILE]
+            ```json
+            {json_profile_str}
+            ```
+            """
+            
+            # textwrap.dedent strips out the code-level indentation spaces
+            cleaned_block = textwrap.dedent(raw_block).strip()
+            profile_blocks.append(cleaned_block)
+        return "\n\n".join(profile_blocks)
+    
     def run_pipeline(self, query: str, data_files: List[str]) -> Dict[str, Any]:
         """Main pipeline with full persistence and resume capability."""
-        self.controller.logger.info(f"Starting pipeline: {self.config.run_id}")
+        self.controller.logger.info(f"Starting pipeline: {str(self.config.run_id)}")
         self.controller.logger.info(f"Query: {query}")
         self.controller.logger.info(f"Data files: {data_files}")
+        conversation_id = self.db_setup.generate_conversation_id(data_files)
+        self.controller.logger.info(f"Conversation_id: {conversation_id}")
         
         # Check for resume state
         state = self.storage.get_current_state()
@@ -566,6 +621,11 @@ class DS_STAR_Agent:
         # Initialize variables that might be loaded from previous runs
         code = None
         exec_result = None
+        history_result=self.db_setup.get_latest_chat_history(self.db_manager, conversation_id)
+        print("CHAT HISTORY:")
+        print(history_result)
+        formated_history_result=self.format_chat_history_for_llm(history_result)
+        self.controller.logger.info(f"Chat History: {formated_history_result}")
         
         # PHASE 1: Data Analysis
         if self.controller.should_execute_step(0):
@@ -597,7 +657,7 @@ class DS_STAR_Agent:
                         # Extract summary JSON
                         profile_json = profile.to_json()
                         profile_summary = self.extract_profile_summary(profile_json)
-                        print("profile_summary",profile_summary)
+                        self.controller.logger.info(f"Profile Summary: {profile_summary}")
                     except Exception as e:
                         self.controller.logger.warning(
                             f"Profiling failed for {f}: {e}"
@@ -620,18 +680,8 @@ class DS_STAR_Agent:
             data_descriptions = state["data_descriptions"]
             absolute_data_files = list(data_descriptions.keys())
 
-        data_desc_str = "\n\n".join([
-            f"""=========================================
-            Full Path: {k}
-            =========================================
-
-            [1. ANALYSIS]
-            {v.get('analysis', '')}
-            [2. PROFILE SUMMARY]
-            {json.dumps(v.get('profile_summary') or {}, indent=2)}
-            """
-                for k, v in data_descriptions.items()
-            ])
+        data_desc_profiles_str = self.format_data_profiles_for_llm(data_descriptions)
+        data_desc_str = "\n".join([f"File: {k}\n{v.get('analysis', '')}" for k, v in data_descriptions.items()])
         
         # PHASE 2: Iterative Planning & Execution
         # Use explicit phase flag instead of step-index math, which broke
@@ -641,7 +691,7 @@ class DS_STAR_Agent:
         if not state.get("phase2_done", False):
             self.controller.logger.info("=== PHASE 2: ITERATIVE PLANNING & VERIFICATION ===")
             plan = []
-            plan.append(self.plan_next_step(query, data_desc_str, plan, ""))
+            plan.append(self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, ""))
             
             code = self.generate_code(plan, data_desc_str)
             code, exec_result = self._execute_and_debug_code(code, absolute_data_files, data_desc_str)
@@ -650,12 +700,9 @@ class DS_STAR_Agent:
             for round_idx in range(self.config.max_refinement_rounds):
                 self.controller.logger.info(f"--- Refinement Round {round_idx+1} ---")
                 
-                ## CHANGED WITH BELLOWverdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
                 verdict = self.verify_plan(plan, code, exec_result, query, data_desc_str)
                 verdict_json = self._parse_verifier_json(verdict)
 
-                ###########################
-                ## CHANGED THE IF: if verdict.lower() == "yes":
                 if verdict_json.get("is_complete", False):
                     self.controller.logger.info("Plan verified as sufficient!")
                     break
@@ -674,10 +721,8 @@ class DS_STAR_Agent:
                     self.controller.logger.info("Adding new step...")
                 
                 # Generate next step
-                #####   ΑΛΛΑΓΗ ΓΙΑ VERIFIER->PLANNER INFO:next_plan = self.plan_next_step(query, data_desc_str, plan, exec_result)
                 verifier_feedback = json.dumps(verdict_json,indent=2, ensure_ascii=False)
-                next_plan = self.plan_next_step(query,data_desc_str,plan, exec_result,verifier_feedback=verifier_feedback)
-                #####################################
+                next_plan = self.plan_next_step(query, data_desc_profiles_str, plan, formated_history_result, exec_result, verifier_feedback=verifier_feedback)
                 plan.append(next_plan)
                 
                 # Generate and execute new code
@@ -712,6 +757,7 @@ class DS_STAR_Agent:
         )
         
         final_code, final_result = self._execute_and_debug_code(final_code, absolute_data_files, data_desc_str)
+        self.db_setup.insert_chat_record(self.db_manager, conversation_id, self.config.run_id, "standalone", query, final_result, data_files)
         
         # Save final output
         output_file = self.storage.run_dir / "final_output" / "result.json"
@@ -720,11 +766,12 @@ class DS_STAR_Agent:
         self.controller.logger.info("Pipeline completed successfully!")
         
         return {
-            "run_id": self.config.run_id,
+            "run_id": str(self.config.run_id),
             "final_result": final_result,
             "output_file": str(output_file),
             "total_steps": len(self.storage.list_steps())
         }
+
 # =============================================================================
 # CLI & USAGE
 # =============================================================================
@@ -752,7 +799,7 @@ def main():
     
     # Combine config sources (CLI args take precedence)
     config_params = {
-        'run_id': args.resume or config_defaults.get('run_id'),
+        'run_id': args.resume or str(uuid.uuid4()),
         'interactive': args.interactive or config_defaults.get('interactive', False),
         'max_refinement_rounds': args.max_rounds or config_defaults.get('max_refinement_rounds', 5),
         'model_name': config_defaults.get('model_name'),
@@ -783,7 +830,7 @@ def main():
     # Run pipeline
     result = agent.run_pipeline(query, data_files)
     print(f"\n{'='*60}")
-    print(f"RUN COMPLETED: {result['run_id']}")
+    print(f"RUN COMPLETED: {str(result['run_id'])}")
     print(f"OUTPUT: {result['output_file']}")
     print(f"FINAL RESULT:\n{result['final_result']}")
     print(f"{'='*60}")

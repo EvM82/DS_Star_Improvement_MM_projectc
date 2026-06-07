@@ -12,142 +12,6 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from provider import ModelProvider, GeminiProvider, OllamaProvider, OpenAIProvider
 
-#######################################################################################################
-######################################## Schema for classifier query, verification changes output######
-QUERY_CLASSIFIER_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "query_type": {
-            "type": "string",
-            "enum": ["standalone", "follow_up"]
-        },
-        "confidence": {
-            "type": "number",
-            "minimum": 0.0,
-            "maximum": 1.0
-        },
-        "reason": {
-            "type": "string"
-        },
-        "needs_history": {
-            "type": "boolean"
-        }
-    },
-    "required": ["query_type", "confidence", "reason", "needs_history"],
-    "additionalProperties": False
-}
-
-
-VERIFIER_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "is_complete": {"type": "boolean"},
-        "answered_requirements": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-        "missing_requirements": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-        "execution_errors": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-        "next_recommended_step": {"type": "string"},
-        "reason": {"type": "string"}
-    },
-    "required": [
-        "is_complete",
-        "answered_requirements",
-        "missing_requirements",
-        "execution_errors",
-        "next_recommended_step",
-        "reason"
-    ],
-    "additionalProperties": False
-}
-
-
-
-TASK_ANALYZER_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "primary_task": {
-            "type": "string",
-            "enum": [
-                "eda",
-                "visualization",
-                "classification",
-                "regression",
-                "clustering",
-                "data_cleaning",
-                "statistical_analysis",
-                "unknown"
-            ]
-        },
-        "secondary_tasks": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "enum": [
-                    "eda",
-                    "visualization",
-                    "classification",
-                    "regression",
-                    "clustering",
-                    "data_cleaning",
-                    "statistical_analysis",
-                    "unknown"
-                ]
-            }
-        },
-        "requires_machine_learning": {
-            "type": "boolean"
-        },
-        "ml_problem_type": {
-            "type": "string",
-            "enum": [
-                "classification",
-                "regression",
-                "clustering",
-                "none",
-                "unknown"
-            ]
-        },
-        "target_column": {
-            "type": ["string", "null"]
-        },
-        "requested_outputs": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-        "planning_hints": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-        "reason": {
-            "type": "string"
-        }
-    },
-    "required": [
-        "primary_task",
-        "secondary_tasks",
-        "requires_machine_learning",
-        "ml_problem_type",
-        "target_column",
-        "requested_outputs",
-        "planning_hints",
-        "reason"
-    ],
-    "additionalProperties": False
-}
-
-###########################################################################
-###########################################################################
-
-
-
 # =============================================================================
 # CONFIGURATION & PROMPT TEMPLATES
 # =============================================================================
@@ -378,7 +242,7 @@ class DS_STAR_Agent:
         default_model = config.model_name
 
         # List of known agents
-        agents = ["ANALYZER", "QUERY_CLASSIFIER","TASK_ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
+        agents = ["ANALYZER", "QUERY_CLASSIFIER", "CONTEXTUALIZER", "TASK_ANALYZER", "PLANNER", "CODER", "VERIFIER", "ROUTER", "DEBUGGER", "FINALYZER"]
 
         def get_provider_for_model(model_name: str, config: DSConfig) -> ModelProvider:
             provider_cls = None
@@ -482,19 +346,26 @@ class DS_STAR_Agent:
                 "planning_hints": [],
                 "reason": task_analysis
             }
-  
+
 
     def _parse_query_classifier_json(self, result: str) -> dict:
         try:
             return json.loads(result)
         except Exception:
             return {
-                "query_type": "follow_up",
-                "confidence": 0.0,
-                "reason": result,
-                "needs_history": True,
-                "missing_context": []
-            }  
+               "query_type": "follow_up"
+            }
+
+
+    def _parse_contextualizer_json(self, result: str) -> dict:
+        try:
+            return json.loads(result)
+        except Exception:
+            return {
+                "standalone_question": result,
+                "used_history": False,
+                "reason": "Failed to parse contextualizer JSON."
+            }
 
 ##############################################################################
 
@@ -571,7 +442,7 @@ class DS_STAR_Agent:
                 "QUERY_CLASSIFIER",
                 prompt,
                 temperature=0,
-                format=QUERY_CLASSIFIER_SCHEMA
+                format=PROMPT_TEMPLATES["query_classifier_schema"]
             ),
             prompt=prompt,
             query=query
@@ -612,7 +483,7 @@ class DS_STAR_Agent:
                 "TASK_ANALYZER",
                 prompt,
                 temperature=0,
-                format=TASK_ANALYZER_SCHEMA
+                format=PROMPT_TEMPLATES["task_analyzer_schema"]
             ),
             prompt=prompt,
             query=query
@@ -621,6 +492,31 @@ class DS_STAR_Agent:
         return self._parse_task_analysis_json(result)
 
     ###################################
+
+
+  ############################################ added contextualise ##############################################
+    def contextualize_query(self, query: str, history: str) -> Dict[str, Any]:
+        prompt = PROMPT_TEMPLATES["contextualizer"].format(
+            question=query,
+            history=history
+        )
+
+        result = self.controller.execute_step(
+            "contextualizer",
+            step_func=lambda prompt=prompt, **kwargs: self._call_model(
+                "CONTEXTUALIZER",
+                prompt,
+                temperature=0,
+                format=PROMPT_TEMPLATES["contextualizer_schema"]
+            ),
+            prompt=prompt,
+            query=query
+        ).strip()
+
+        return self._parse_contextualizer_json(result)
+###############################################################################################
+
+
 
     def plan_next_step(self, query: str, data_desc: str, current_plan: List[str], last_result: Optional[str], verifier_feedback=None,task_analysis=None) -> str:
         ### add below
@@ -681,7 +577,7 @@ class DS_STAR_Agent:
 
         return self.controller.execute_step(
             "verifier",
-            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt,temperature=0,format=VERIFIER_SCHEMA),  # FIXED
+            step_func=lambda prompt=prompt, **kwargs: self._call_model("VERIFIER", prompt,temperature=0,format=PROMPT_TEMPLATES["verifier_schema"]),  # FIXED
             prompt=prompt,
             plan_length=len(plan)
         ).strip()
@@ -751,19 +647,48 @@ class DS_STAR_Agent:
 
         # PHASE 0: Check the query (follow up or not)
         ##### Check the query class
+        original_query = query
+
         if not state.get("query_classified", False):
             query_classification = self.classify_query(query)
 
             state = self.storage.get_current_state()
             state["query_classification"] = query_classification
             state["query_classified"] = True
+            state["original_query"] = original_query
             self.storage.save_state(state)
         else:
             query_classification = state["query_classification"]
+            
+        print("Query type:", query_classification.get("query_type"))
+
+        if query_classification.get("query_type") == "follow_up":
+            history = """ """  #προσωρινά μεχρι να μπει το db
+
+            contextualized = self.contextualize_query(query, history)
+
+            print("\nORIGINAL QUERY:")
+            print(query)
+
+            print("\nCONTEXTUALIZED:")
+            print(contextualized)
+
+            query = contextualized["standalone_question"]
+
+            state = self.storage.get_current_state()
+            state["contextualized_query"] = contextualized
+            state["final_query"] = query
+            self.storage.save_state(state)
+
+
+        else:
+            state = self.storage.get_current_state()
+            state["final_query"] = query
+            self.storage.save_state(state)
 
         # PHASE 1: Data Analysis
 
-        ## 
+        ##
         state = self.storage.get_current_state()
 
         #if self.controller.should_execute_step(0):

@@ -1,3 +1,136 @@
+query_classifier_schema:
+  type: object
+  properties:
+    query_type:
+      type: string
+      enum:
+        - standalone
+        - follow_up
+  required:
+    - query_type
+  additionalProperties: false
+
+verifier_schema:
+  type: object
+  properties:
+    is_complete:
+      type: boolean
+    answered_requirements:
+      type: array
+      items:
+        type: string
+    missing_requirements:
+      type: array
+      items:
+        type: string
+    execution_errors:
+      type: array
+      items:
+        type: string
+    next_recommended_step:
+      type: string
+    reason:
+      type: string
+  required:
+    - is_complete
+    - answered_requirements
+    - missing_requirements
+    - execution_errors
+    - next_recommended_step
+    - reason
+  additionalProperties: false
+
+
+task_analyzer_schema:
+  type: object
+  properties:
+    primary_task:
+      type: string
+      enum:
+        - eda
+        - visualization
+        - classification
+        - regression
+        - clustering
+        - data_cleaning
+        - statistical_analysis
+        - unknown
+
+    secondary_tasks:
+      type: array
+      items:
+        type: string
+        enum:
+          - eda
+          - visualization
+          - classification
+          - regression
+          - clustering
+          - data_cleaning
+          - statistical_analysis
+          - unknown
+
+    requires_machine_learning:
+      type: boolean
+
+    ml_problem_type:
+      type: string
+      enum:
+        - classification
+        - regression
+        - clustering
+        - none
+        - unknown
+
+    target_column:
+      type:
+        - string
+        - "null"
+
+    requested_outputs:
+      type: array
+      items:
+        type: string
+
+    planning_hints:
+      type: array
+      items:
+        type: string
+
+    reason:
+      type: string
+
+  required:
+    - primary_task
+    - secondary_tasks
+    - requires_machine_learning
+    - ml_problem_type
+    - target_column
+    - requested_outputs
+    - planning_hints
+    - reason
+
+  additionalProperties: false
+
+
+contextualizer_schema:
+  type: object
+  properties:
+    standalone_question:
+      type: string
+    used_history:
+      type: boolean
+    reason:
+      type: string
+
+  required:
+    - standalone_question
+    - used_history
+    - reason
+
+  additionalProperties: false
+
+
 query_classifier: |
   You are a conversation continuity classifier.
 
@@ -18,7 +151,9 @@ query_classifier: |
 
   - A question is NOT follow_up simply because it requires a dataset, file, image, or other input.
   - Missing information does NOT imply follow_up.
+  -- Missing conversational reference caused by pronouns like "it", "its", "this", or "that" DOES imply follow_up.
   - Only classify as follow_up when previous conversation context would be useful or necessary.
+  -- If the question contains pronouns or vague references such as "it", "its", "this", "that", "these", "those", classify it as "follow_up", unless the referenced object is explicitly named in the question.
 
   Common follow_up indicators:
   - continue
@@ -61,17 +196,55 @@ query_classifier: |
   User: "Now try XGBoost"
   -> follow_up
 
+  User: "What is its distribution?"
+  -> follow_up
+
+  User: "Show its distribution"
+  -> follow_up
+
+  User: "Is it balanced?"
+  -> follow_up
+
+  User: "What about that?"
+  -> follow_up
+
   User question:
   {question}
 
   Return only valid JSON:
 
   {{
-    "query_type": "standalone | follow_up",
-    "confidence": 0.0,
-    "reason": "short explanation",
-    "needs_history": false
+    "query_type": "standalone | follow_up"
   }}
+
+
+
+
+contextualizer: |
+  You are a query contextualization agent.
+
+  Your task is to rewrite a follow-up user question into a complete standalone question using the provided history.
+
+  Previous conversation history:
+  {history}
+
+  Current user question:
+  {question}
+
+  Return only valid JSON:
+
+  {{
+    "standalone_question": "complete standalone question",
+    "used_history": true,
+    "reason": "short explanation"
+  }}
+
+  Rules:
+  - Do not answer the question.
+  - Only rewrite the question.
+  - Preserve the user's original intent.
+  - If the question is already standalone, return it unchanged.
+  - Return JSON only.
 
 
 

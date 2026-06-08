@@ -3,7 +3,7 @@ name = "ds-star"
 version = "0.1.0"
 description = "DS-STAR: A Data Science Agentic Framework"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = "==3.11.15"
 license = { text = "MIT" }
 authors = [
     {name = "Jules Lascoux", email="jlslascoux@gmail.com"},
@@ -24,16 +24,18 @@ classifiers = [
 
 dependencies = [
     "google-generativeai>=0.8.0",
-    "pydantic>=2.12.0",
-    "PyYAML>=6.0",
-    "tqdm>=4.67.0",
-    "requests>=2.32.0",
-    "openai>=2.8.1",
-    "pandas>=2.3.3",
+    "ollama>=0.6.2",
+    "openai>=2.41.0",
     "openpyxl>=3.1.5",
-    "ollama>=0.6.1",
-    "ydata-profiling",
+    "pandas>=2.3.3",
+    "psycopg-pool>=3.3.1",
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
     "setuptools<81",
+    "tqdm>=4.68.1",
+    "ydata-profiling>=4.18.4",
 ]
 
 [project.scripts]
@@ -49,9 +51,11 @@ Documentation = "https://github.com/JulesLscx/DS-Star#readme"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
-
 [tool.hatch.build.targets.wheel]
 packages = ["dsstar.py"]
 
+[dependency-groups]
+dev = []
+
+[tool.uv.dependency-groups]
+dev = {requires-python = "==3.11.15"}

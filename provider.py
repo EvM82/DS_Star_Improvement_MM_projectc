@@ -20,14 +20,14 @@ class ModelProvider(ABC):
         pass
 
     @abstractmethod
-    def generate_content(self, prompt: str) -> str:
+    def generate_content(self, prompt: str,temperature=None, format=None) -> str:
         """Generates content based on the prompt."""
         pass
 
 
 class GeminiProvider(ModelProvider):
     """Provider for Google's Gemini models."""
-    
+
     def __init__(self, config_api_key: str, model_name: str):
         # In GeminiProvider the order is first config_api_key for backward compatibility
         self.api_key = config_api_key or os.getenv(self.env_var_name)
@@ -46,15 +46,15 @@ class GeminiProvider(ModelProvider):
     @property
     def env_var_name(self) -> str:
         return "GEMINI_API_KEY"
-        
-    def generate_content(self, prompt: str) -> str:
+
+    def generate_content(self, prompt: str, temperature=None, format=None) -> str:
         response = self.model.generate_content(prompt)
         return response.text
 
 
 class OpenAIProvider(ModelProvider):
     """Provider for OpenAI models."""
-    
+
     def __init__(self, config_api_key: str, model_name: str):
         self.api_key = os.getenv(self.env_var_name, config_api_key)
         if not self.api_key:
@@ -70,8 +70,8 @@ class OpenAIProvider(ModelProvider):
     @property
     def env_var_name(self) -> str:
         return "OPENAI_API_KEY"
-        
-    def generate_content(self, prompt: str) -> str:
+
+    def generate_content(self, prompt: str, temperature=None, format=None) -> str:
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[{"role": "user", "content": prompt}]
@@ -103,9 +103,18 @@ class OllamaProvider(ModelProvider):
     def env_var_name(self) -> str:
         return "OLLAMA_API_KEY"
 
-    def generate_content(self, prompt: str) -> str:
-        response = self.client.chat(
-            self.model_name,
-            messages=[{"role": "user", "content": prompt}]
-        )
+    ##### add temperature,format.....
+    def generate_content(self, prompt: str, temperature=None, format=None) -> str:
+        kwargs = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+
+        if format is not None:
+            kwargs["format"] = format
+
+        if temperature is not None:
+            kwargs["options"] = {"temperature": temperature}
+      
+        response = self.client.chat(**kwargs)
         return response.message.content

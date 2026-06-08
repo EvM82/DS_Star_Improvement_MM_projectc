@@ -1,5 +1,4 @@
 
-run_id: "iris1"
 model_name: "ollama/qwen3:8b"
 interactive: false
 max_refinement_rounds: 1

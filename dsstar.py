@@ -916,6 +916,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="DS-STAR Data Science Agent")
+    parser.add_argument("--run-id", type=str, help="Custom run ID")
     parser.add_argument("--resume", type=str, help="Resume from run ID")
     parser.add_argument("--interactive", action="store_true", help="Pause between steps")
     parser.add_argument("--edit-last", action="store_true", help="Edit last generated code")
@@ -934,7 +935,7 @@ def main():
     
     # Combine config sources (CLI args take precedence)
     config_params = {
-        'run_id': args.resume or str(uuid.uuid4()),
+        'run_id': args.run_id or args.resume or str(uuid.uuid4()),
         'interactive': args.interactive or config_defaults.get('interactive', False),
         'max_refinement_rounds': args.max_rounds or config_defaults.get('max_refinement_rounds', 5),
         'model_name': config_defaults.get('model_name'),

@@ -30,7 +30,7 @@ class DatabaseSetup:
                             id SERIAL PRIMARY KEY,
                             data_paths TEXT[],
                             conversation_id UUID NOT NULL, 
-                            run_id UUID NOT NULL,
+                            run_id TEXT NOT NULL,
                             query_class query_class_type NOT NULL,
                             user_query TEXT NOT NULL,
                             answer TEXT NOT NULL,

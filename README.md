@@ -37,7 +37,7 @@ The DS-STAR pipeline is composed of several phases and agents:
 3.  **Finalization**: The `Finalyzer` agent takes the final code and results and formats them into a clean, specified output format (e.g., JSON).
 
 ## Main Contributions
-**Query Classification** 
+### Query Classification
 A new Query Classifier agent was introduced to determine whether a user query:
 * starts a new conversation (standalone)
 * continues a previous discussion (follow_up)

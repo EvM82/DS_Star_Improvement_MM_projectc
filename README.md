@@ -2,7 +2,16 @@
 
 DS-STAR (Data Science - Structured Thought and Action) is a Python-based agentic framework for automating data science tasks. It leverages a multi-agent system powered by Google's Gemini models to analyze data, devise a plan, write and execute code, and iteratively refine the solution to answer a user's query.
 
-This project is an implementation of the paper from Google Research: [DS-STAR: A State-of-the-Art Versatile Data Science Agent](https://research.google/blog/ds-star-a-state-of-the-art-versatile-data-science-agent/). [Paper](https://arxiv.org/pdf/2509.21825)
+The project extends the original agentic architecture ( https://github.com/JulesLscx/DS-Star) which is based on the paper from Google Research [DS-STAR: A State-of-the-Art Versatile Data Science Agent], with improved task understanding, conversational context handling, structured outputs, and verifier-guided planning.
+
+The goal of this work is to improve the robustness and reasoning capabilities of DS-STAR by enabling the system to:
+
+Understand whether a user query is standalone or a follow-up question.
+Reconstruct ambiguous follow-up questions into self-contained queries.
+Explicitly analyze the type of task requested by the user before planning.
+Use structured JSON outputs enforced through Ollama schemas.
+Improve iterative planning through structured verifier feedback.
+Support future integration with conversation memory and semantic retrieval systems.
 
 ## Features
 
@@ -26,6 +35,58 @@ The DS-STAR pipeline is composed of several phases and agents:
     *   The `Router` decides what to do next: either finalize the plan or add a new step for refinement.
     *   This loop continues until the plan is deemed sufficient or the maximum number of refinement rounds is reached.
 3.  **Finalization**: The `Finalyzer` agent takes the final code and results and formats them into a clean, specified output format (e.g., JSON).
+
+## Main Contributions
+**Query Classification** 
+A new Query Classifier agent was introduced to determine whether a user query:
+* starts a new conversation (standalone)
+* continues a previous discussion (follow_up)
+
+This allows the framework to distinguish between independent requests and context-dependent questions.
+
+**Contextualization**
+A new Contextualizer agent rewrites follow-up questions into self-contained standalone queries using retrieved conversation history.
+
+Example:
+User: Find the target variable.
+
+History:The target variable is species.
+
+Follow-up:What is its distribution?
+
+Contextualized query: What is the distribution of the species variable?
+
+**Task Analysis**
+A new Task Analyzer agent performs explicit task understanding before planning.
+The agent identifies:
+* primary task
+* secondary tasks
+* machine learning requirements
+* problem type
+* target variable
+* requested outputs
+
+This information is then provided to the Planner to improve planning quality.
+
+**Structured Outputs**
+The framework was extended to use Ollama Structured Outputs through JSON Schemas.
+Structured schemas were implemented for:
+*Query Classifier
+*Contextualizer
+*Task Analyzer
+*Verifier
+This improves output consistency and reduces parsing failures.
+
+**Verifier-Guided Planning**
+The Verifier was redesigned to return structured feedback containing:
+* completion status
+* satisfied requirements
+* missing requirements
+* execution errors
+* recommended next action
+
+The Planner uses this feedback during refinement rounds to generate more targeted plans.
+
 
 All artifacts for each run are stored in the `runs/` directory, organized by `run_id`.
 

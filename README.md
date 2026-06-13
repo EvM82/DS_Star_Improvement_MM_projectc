@@ -94,8 +94,8 @@ Instead of relying solely on the LLM to infer dataset characteristics from sampl
 
 ### Other changes
 * A fully containerized PostgreSQL 17 database was integrated using Docker Compose, serving as the central repository for storing multi-turn interaction logs.
-* * To automatically identify projects, the system generates a deterministic conversation ID by normalizing and alphabetically sorting dataset paths and applying SHA-256 hashing, enabling project recognition without manual configuration.
-  * * Additionally, each pipeline execution automatically creates a unique run ID, ensuring complete isolation and traceability of generated artifacts, outputs, and logs.
+*  To automatically identify projects, the system generates a deterministic conversation ID by normalizing and alphabetically sorting dataset paths and applying SHA-256 hashing, enabling project recognition without manual configuration.
+*  Additionally, each pipeline execution automatically creates a unique run ID, ensuring complete isolation and traceability of generated artifacts, outputs, and logs.
 
 All artifacts for each run are stored in the `runs/` directory, organized by `run_id`.
 

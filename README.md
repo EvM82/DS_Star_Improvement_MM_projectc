@@ -44,7 +44,7 @@ A new Query Classifier agent was introduced to determine whether a user query:
 
 This allows the framework to distinguish between independent requests and context-dependent questions.
 
-**Contextualization**
+### Contextualization
 A new Contextualizer agent rewrites follow-up questions into self-contained standalone queries using retrieved conversation history.
 
 Example:
@@ -56,7 +56,7 @@ Follow-up:What is its distribution?
 
 Contextualized query: What is the distribution of the species variable?
 
-**Task Analysis**
+### Task Analysis
 A new Task Analyzer agent performs explicit task understanding before planning.
 The agent identifies:
 * primary task
@@ -68,7 +68,7 @@ The agent identifies:
 
 This information is then provided to the Planner to improve planning quality.
 
-**Structured Outputs**
+### Structured Outputs
 The framework was extended to use Ollama Structured Outputs through JSON Schemas.
 Structured schemas were implemented for:
 *Query Classifier
@@ -77,7 +77,7 @@ Structured schemas were implemented for:
 *Verifier
 This improves output consistency and reduces parsing failures.
 
-**Verifier-Guided Planning**
+### Verifier-Guided Planning
 The Verifier was redesigned to return structured feedback containing:
 * completion status
 * satisfied requirements
@@ -86,7 +86,16 @@ The Verifier was redesigned to return structured feedback containing:
 * recommended next action
 
 The Planner uses this feedback during refinement rounds to generate more targeted plans.
+### History
+The system automatically retrieves the four most recent question–answer records from PostgreSQL and formats them as structured conversational context. This context is supplied to both the Planner Init and Planner Next agents, enriching the planning process with project history. As a result, even standalone queries are handled with awareness of previous decisions, dataset characteristics, and user requirements, ensuring consistent and context-aware execution.
 
+### Data Profiling
+Instead of relying solely on the LLM to infer dataset characteristics from sample rows, the system integrates the ydata-profiling library to generate a comprehensive dataset profile. A full interactive HTML report containing statistical summaries, correlations, and feature distributions is produced and stored. To avoid overwhelming the LLM context window, only the most relevant information—such as data schemas, inferred task types, and structural warnings—is extracted into a compact JSON representation and provided directly to the planning agents.
+
+### Other changes
+* A fully containerized PostgreSQL 17 database was integrated using Docker Compose, serving as the central repository for storing multi-turn interaction logs.
+* * To automatically identify projects, the system generates a deterministic conversation ID by normalizing and alphabetically sorting dataset paths and applying SHA-256 hashing, enabling project recognition without manual configuration.
+  * * Additionally, each pipeline execution automatically creates a unique run ID, ensuring complete isolation and traceability of generated artifacts, outputs, and logs.
 
 All artifacts for each run are stored in the `runs/` directory, organized by `run_id`.
 
